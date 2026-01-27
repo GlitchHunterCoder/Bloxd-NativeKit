@@ -118,11 +118,15 @@ function createNative(blueprint = {}, autoBoxLiterals = true) {
     }
   }
   if (blueprint.static) {
-    Try(()=>{
-      Object.defineProperties(
-        Native,
-        Object.getOwnPropertyDescriptors(blueprint.static)
-      )
+    Try(() => {
+      const descriptors = Object.getOwnPropertyDescriptors(blueprint.static)
+      for (const key of Reflect.ownKeys(descriptors)) {
+        const desc = descriptors[key]
+        if (key === "prototype" || (desc && desc.configurable === false)) {
+          delete descriptors[key]
+        }
+      }
+      Object.defineProperties(Native, descriptors)
     })
   }
   return Native
@@ -135,11 +139,15 @@ function convertNative(GlobalObj, options = {}) {
   }
   if (GlobalObj.prototype) {
     for (const key of Reflect.ownKeys(GlobalObj.prototype)) {
-      const desc = Object.getOwnPropertyDescriptor(GlobalObj.prototype,key)
+      const desc = Object.getOwnPropertyDescriptor(
+        GlobalObj.prototype,
+        key
+      )
       if (!desc) continue
       blueprint.proto[key] = desc
     }
-    blueprint.protoProto = Object.getPrototypeOf(GlobalObj.prototype)
+    blueprint.protoProto =
+      Object.getPrototypeOf(GlobalObj.prototype)
   }
   for (const key of Reflect.ownKeys(GlobalObj)) {
     if (key === "length" || key === "name") continue
@@ -148,7 +156,8 @@ function convertNative(GlobalObj, options = {}) {
     if (!("value" in desc) && !desc.configurable) continue
     blueprint.static[key] = desc
   }
-  blueprint.constructorProto = Object.getPrototypeOf(GlobalObj)
+  blueprint.constructorProto =
+    Object.getPrototypeOf(GlobalObj)
   blueprint.coerce = options.coerce ?? (x => GlobalObj(x))
   blueprint.literal = options.literal ?? (x => GlobalObj(x))
   blueprint.wrapBuiltIns = GlobalObj
