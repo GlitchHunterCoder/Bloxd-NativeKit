@@ -1,69 +1,157 @@
+globalThis.GeneratorFunction = function* () {}.constructor;
+globalThis.Generator = function* () {}().constructor;
+
+const ErrMsg = (e) => {
+  api.broadcastMessage(
+    `${e.name}: ${e.message}\n${e.stack}`,
+    { color: "red" }
+  );
+};
+
+const Try = (fn, ctx = this, ...params) => {
+  try { fn.apply(ctx, params) }
+  catch (e) { ErrMsg(e); }
+}
+
 function createNative(blueprint = {}, autoBoxLiterals = true) {
-  const Native = function(input) {
+  function Native(input) {
     const DATA = Native.DATA
     function makeLiteral(value) {
-      if (autoBoxLiterals) {
-        const Box = Object.create(Native.prototype)
-        Box[DATA] = blueprint.coerce ? blueprint.coerce(value) : value
-        return Box
-      } else {
-        const Box = blueprint.literal ? blueprint.literal(value) : value
-        Box[DATA] = blueprint.coerce ? blueprint.coerce(value) : value
-        let temp = "setProto"
-        temp+="typeOf"
-        Object[temp](Box, Native.prototype)
-        return Box
-      }
+      const coerced = blueprint.coerce ? blueprint.coerce(value) : value
+      const box = Object.create(Native.prototype)
+      Object.defineProperty(box, DATA, {
+        value: coerced,
+        writable: false,
+        configurable: false
+      })
+      return box
     }
     if (!new.target) return makeLiteral(input)
-    this[DATA] = blueprint.coerce ? blueprint.coerce(input) : input
+    Object.defineProperty(this, DATA, {
+      value: blueprint.coerce ? blueprint.coerce(input) : input,
+      writable: false,
+      configurable: false
+    })
     return this
   }
   Native.DATA = Symbol("NativeInternalData")
-  Native.prototype = Object.assign({}, blueprint.proto || {})
-  Native.prototype.valueOf = function() { return this[Native.DATA] }
-  Native.prototype[Symbol.toPrimitive] = function() { return this[Native.DATA] }
-  if (blueprint.wrapBuiltIns) {
-    const protoKeys = Object.getOwnPropertyNames(blueprint.wrapBuiltIns.prototype)
-    for (const key of protoKeys) {
-      const desc = Object.getOwnPropertyDescriptor(blueprint.wrapBuiltIns.prototype, key)
-      if (desc && typeof desc.value === "function") {
-        Native.prototype[key] = function(...args) {
-          return desc.value.apply(this[Native.DATA], args)
-        }
-      }
+  const proto = blueprint.proto || Object.create(null)
+  const protoProto = blueprint.protoProto ?? Object.prototype
+  Native.prototype = Object.create(protoProto)
+  Try(()=>{Object.defineProperties(
+    Native.prototype,
+    Object.getOwnPropertyDescriptors(proto)
+  )})
+  Object.defineProperty(Native.prototype, "constructor", {
+    value: Native,
+    writable: true,
+    configurable: true
+  })
+  Object.setPrototypeOf(
+    Native,
+    blueprint.constructorProto ?? Function.prototype
+  )
+  function assertBrand(self) {
+    if (
+      !self ||
+      !Object.prototype.hasOwnProperty.call(self, Native.DATA)
+    ) {
+      throw new TypeError("Incompatible receiver")
     }
   }
-  Object.assign(Native, blueprint.static || {})
+  if (!Native.prototype.valueOf) {
+    Object.defineProperty(Native.prototype, "valueOf", {
+      value() {
+        assertBrand(this)
+        return this[Native.DATA]
+      },
+      writable: true,
+      configurable: true
+    })
+  }
+  if (!Native.prototype.toString) {
+    Object.defineProperty(Native.prototype, "toString", {
+      value() {
+        assertBrand(this)
+        return String(this[Native.DATA])
+      },
+      writable: true,
+      configurable: true
+    })
+  }
+  if (!Native.prototype[Symbol.toPrimitive]) {
+    Object.defineProperty(Native.prototype, Symbol.toPrimitive, {
+      value() {
+        assertBrand(this)
+        return this[Native.DATA]
+      },
+      writable: true,
+      configurable: true
+    })
+  }
+  Object.defineProperty(Native, Symbol.hasInstance, {
+    value(obj) {
+      return (
+        !!obj &&
+        Object.prototype.hasOwnProperty.call(obj, Native.DATA)
+      )
+    },
+    configurable: true
+  })
+  if (blueprint.wrapBuiltIns) {
+    const srcProto = blueprint.wrapBuiltIns.prototype
+    const unwrapThis = blueprint.unwrapThis ?? true
+    for (const key of Reflect.ownKeys(srcProto)) {
+      if (key in Native.prototype) continue
+      const desc = Object.getOwnPropertyDescriptor(srcProto, key)
+      if (!desc || typeof desc.value !== "function") continue
+      Object.defineProperty(Native.prototype, key, {
+        value(...args) {
+          assertBrand(this)
+          const receiver = unwrapThis ? this[Native.DATA] : this
+          return desc.value.apply(receiver, args)
+        },
+        writable: true,
+        configurable: true,
+        enumerable: false
+      })
+    }
+  }
+  if (blueprint.static) {
+    Try(()=>{
+      Object.defineProperties(
+        Native,
+        Object.getOwnPropertyDescriptors(blueprint.static)
+      )
+    })
+  }
   return Native
 }
 
 function convertNative(GlobalObj, options = {}) {
-  const blueprint = {}
-  blueprint.proto = {}
+  const blueprint = {
+    proto: Object.create(null),
+    static: Object.create(null)
+  }
   if (GlobalObj.prototype) {
-    for (const key of Object.getOwnPropertyNames(GlobalObj.prototype)) {
-      const desc = Object.getOwnPropertyDescriptor(GlobalObj.prototype, key)
-      if (desc && typeof desc.value === "function" && desc.writable !== false) {
-        blueprint.proto[key] = desc.value
-      }
+    for (const key of Reflect.ownKeys(GlobalObj.prototype)) {
+      const desc = Object.getOwnPropertyDescriptor(GlobalObj.prototype,key)
+      if (!desc) continue
+      blueprint.proto[key] = desc
     }
-    for (const sym of Object.getOwnPropertySymbols(GlobalObj.prototype)) {
-      blueprint.proto[sym] = GlobalObj.prototype[sym]
-    }
+    blueprint.protoProto = Object.getPrototypeOf(GlobalObj.prototype)
   }
-  blueprint.static = {}
-  for (const key of Object.getOwnPropertyNames(GlobalObj)) {
+  for (const key of Reflect.ownKeys(GlobalObj)) {
+    if (key === "length" || key === "name") continue
     const desc = Object.getOwnPropertyDescriptor(GlobalObj, key)
-    if (!desc || (desc.writable !== false && desc.configurable !== false)) {
-      blueprint.static[key] = GlobalObj[key]
-    }
+    if (!desc) continue
+    if (!("value" in desc) && !desc.configurable) continue
+    blueprint.static[key] = desc
   }
-  for (const sym of Object.getOwnPropertySymbols(GlobalObj)) {
-    blueprint.static[sym] = GlobalObj[sym]
-  }
-  blueprint.coerce = options.coerce || (x => GlobalObj(x))
-  blueprint.literal = options.literal || (x => GlobalObj(x))
+  blueprint.constructorProto = Object.getPrototypeOf(GlobalObj)
+  blueprint.coerce = options.coerce ?? (x => GlobalObj(x))
+  blueprint.literal = options.literal ?? (x => GlobalObj(x))
   blueprint.wrapBuiltIns = GlobalObj
+  blueprint.unwrapThis = options.unwrapThis ?? true
   return blueprint
 }
