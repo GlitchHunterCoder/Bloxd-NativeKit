@@ -20,17 +20,30 @@ A blueprint defines:
 - how coercion works
 - how prototype methods are resolved
 
-`createNative` builds a new intrinsic-like type from scratch using a blueprint object. `convertNative` derives a blueprint automatically from an existing JS intrinsic like `Number` or `String`, then passes it to `createNative`.
+`convertNative` derives a blueprint from an existing JS intrinsic. That blueprint can then be edited directly before being passed to `createNative`, which builds the final constructor.
 
 ```js
-// from scratch
+// derive blueprint from existing intrinsic
+const NumberBlueprint = convertNative(Number)
+
+// edit the blueprint before creating
+NumberBlueprint.proto.double = function() {
+  return this[MyNumber.DATA] * 2
+}
+
+// build the constructor from the blueprint
+const MyNumber = createNative(NumberBlueprint)
+```
+
+`createNative` can also build a type from scratch with no existing intrinsic:
+
+```js
 const MyNum = createNative({
   coerce: x => Number(x),
-  proto: { double() { return this[MyNum.DATA] * 2 } }
+  proto: {
+    double() { return this[MyNum.DATA] * 2 }
+  }
 })
-
-// from existing intrinsic
-const MyNumber = convertNative(Number)
 ```
 
 Both paths produce a constructor that:
@@ -45,7 +58,7 @@ Both paths produce a constructor that:
 
 ## All User Features
 
-- `convertNative(GlobalObj)` — derives a mutable blueprint from an existing intrinsic and returns a constructor that mirrors its behaviour
+- `convertNative(GlobalObj)` — derives a mutable blueprint from an existing intrinsic, ready to edit before passing to `createNative`
 - `createNative(blueprint)` — builds a new intrinsic-like constructor from a blueprint object
 - **callable without `new`** — returns a literal value
 - **callable with `new`** — returns a boxed object instance
@@ -60,7 +73,7 @@ Both paths produce a constructor that:
 
 ## `blueprint` object
 
-when using `createNative` directly, the blueprint controls every aspect of the resulting type
+the blueprint is a plain object — it can be edited freely between `convertNative` and `createNative`
 
 | Field | What it does |
 |---|---|
@@ -78,39 +91,57 @@ when using `createNative` directly, the blueprint controls every aspect of the r
 
 ### Basic Instance
 ```js
-const MyNumber = convertNative(Number)
+const MyNumber = createNative(convertNative(Number))
 
 const n = MyNumber(10)
 console.log(n + 5)  // 15
 ```
 
-### Override `.valueOf`
+### Override `.valueOf` via Blueprint
 ```js
-const MyNumber = convertNative(Number)
+const blueprint = convertNative(Number)
 
-MyNumber.prototype.valueOf = function () {
-  return this[MyNumber.DATA] * 2
+blueprint.proto.valueOf = function () {
+  return this[blueprint.DATA ?? Symbol()] * 2
 }
+
+const MyNumber = createNative(blueprint)
 
 const n = MyNumber(10)
 console.log(n + 5)  // 25
 ```
 
-### Custom Methods
+### Custom Methods via Blueprint
 ```js
-const MyNumber = convertNative(Number)
+const blueprint = convertNative(Number)
 
-MyNumber.prototype.toString = function () {
+blueprint.proto.toString = function () {
   return `MyNumber(${this[MyNumber.DATA]})`
 }
 
-MyNumber.prototype.double = function () {
+blueprint.proto.double = function () {
   return this[MyNumber.DATA] * 2
 }
+
+const MyNumber = createNative(blueprint)
 
 const n = MyNumber(7)
 console.log(String(n))   // "MyNumber(7)"
 console.log(n.double())  // 14
+```
+
+### Edit After Creation
+```js
+const MyNumber = createNative(convertNative(Number))
+
+// prototype edits after createNative also work
+// and reflect on all existing instances immediately
+MyNumber.prototype.triple = function () {
+  return this[MyNumber.DATA] * 3
+}
+
+const n = MyNumber(5)
+console.log(n.triple())  // 15
 ```
 
 ### Custom Type from Scratch
@@ -140,7 +171,8 @@ console.log(String(v))  // "Vec2(1, 2)"
 ## All Developer Features
 
 - `createNative(blueprint)` — full blueprint API, every aspect of the type is configurable
-- `convertNative(GlobalObj, options)` — auto-derives a blueprint from an existing intrinsic
+- `convertNative(GlobalObj, options)` — auto-derives a blueprint from an existing intrinsic, returns a plain editable object
+- **blueprint is mutable** — edit any field between `convertNative` and `createNative` to customise behaviour before the constructor is built
 - **reference-based** — built-in methods are forwarded via reference, not cloned
 - **read-only tolerant** — non-configurable or non-writable properties are skipped during conversion rather than throwing
 - **unified call/construct path** — same internal logic handles both `MyType(x)` and `new MyType(x)`
@@ -160,50 +192,71 @@ console.log(String(v))  // "Vec2(1, 2)"
 
 ## Example Developer Programs
 
-### Override Built-in Method
+### Override Built-in Method via Blueprint
 ```js
-const MyString = convertNative(String)
+const blueprint = convertNative(String)
 
-MyString.prototype.repeat = function () {
+blueprint.proto.repeat = function () {
   return "overridden"
 }
+
+const MyString = createNative(blueprint)
 
 console.log(MyString("abc").repeat(3))  // "overridden"
 ```
 
-### Intercept Built-in Method
+### Intercept Built-in Method via Blueprint
 ```js
-const MyArray = convertNative(Array)
+const blueprint = convertNative(Array)
 
-MyArray.prototype.push = function (...items) {
+blueprint.proto.push = function (...items) {
   console.log("intercepted:", items)
   return Array.prototype.push.apply(this[MyArray.DATA], items)
 }
+
+const MyArray = createNative(blueprint)
 
 const a = MyArray([])
 a.push(1, 2, 3)  // intercepted: [1, 2, 3]
 ```
 
-### Invert Boolean
+### Custom Coercion via Blueprint
 ```js
-const MyBoolean = convertNative(Boolean)
+const blueprint = convertNative(Number)
 
-MyBoolean.prototype.valueOf = function () {
+blueprint.coerce = x => Math.abs(Number(x))  // always positive
+
+const MyNumber = createNative(blueprint)
+
+const n = MyNumber(-5)
+console.log(n + 0)  // 5
+```
+
+### Invert Boolean via Blueprint
+```js
+const blueprint = convertNative(Boolean)
+
+blueprint.proto.valueOf = function () {
   return !this[MyBoolean.DATA]
 }
+
+const MyBoolean = createNative(blueprint)
 
 const b = MyBoolean(true)
 console.log(b == false)  // true
 ```
 
-### Static Methods
+### Add Static Methods via Blueprint
 ```js
-const MyNumber = convertNative(Number, {
-  coerce: x => Math.abs(Number(x))  // always positive
-})
+const blueprint = convertNative(Number)
 
-const n = MyNumber(-5)
-console.log(n + 0)  // 5
+blueprint.static.fromHex = function (str) {
+  return MyNumber(parseInt(str, 16))
+}
+
+const MyNumber = createNative(blueprint)
+
+console.log(MyNumber.fromHex("ff") + 0)  // 255
 ```
 
 ---
@@ -213,8 +266,8 @@ console.log(n + 0)  // 5
 ## Known Limitations
 
 - **internal slots** — true engine internal slots like `[[NumberData]]` cannot be recreated, so some native methods may reject the boxed value if they check for the real slot
-- **performance** — forwarding through a proxy layer adds overhead vs native intrinsics
 - **spread and iteration** — types like `Array` need extra work to support `for...of` and spread correctly without a real `[[ArrayExoticObject]]` slot
+- **blueprint DATA** — `Blueprint.DATA` is only available after `createNative` returns, so blueprint `proto` methods that reference it must use the final constructor variable, not the blueprint itself
 
 ## Use Cases
 
@@ -229,26 +282,31 @@ console.log(n + 0)  // 5
 ## Full Example: Everything Together
 
 ```js
-const MyNumber = convertNative(Number)
+const blueprint = convertNative(Number)
 
-MyNumber.prototype.valueOf = function () {
-  return this[MyNumber.DATA] * 3
+blueprint.coerce = x => Math.max(0, Number(x))  // clamp to positive
+
+blueprint.proto.double = function () {
+  return MyNumber(this[MyNumber.DATA] * 2)
 }
+
+blueprint.static.fromHex = function (str) {
+  return MyNumber(parseInt(str, 16))
+}
+
+const MyNumber = createNative(blueprint)
 
 MyNumber.prototype.toString = function () {
   return `MyNumber(${this[MyNumber.DATA]})`
 }
 
-MyNumber.prototype.double = function () {
-  return MyNumber(this[MyNumber.DATA] * 2)
-}
-
 const n1 = MyNumber(10)
-const n2 = new MyNumber(20)
+const n2 = new MyNumber(-5)  // clamped to 0
 
-console.log(n1 + 1)          // 31
-console.log(n2 + 1)          // 61
-console.log(String(n1))      // "MyNumber(10)"
-console.log(n1.double() + 0) // 60
-console.log(n2 instanceof MyNumber)  // true
+console.log(n1 + 1)               // 11
+console.log(n2 + 0)               // 0
+console.log(String(n1))           // "MyNumber(10)"
+console.log(n1.double() + 0)      // 20
+console.log(MyNumber.fromHex("ff") + 0)  // 255
+console.log(n1 instanceof MyNumber)      // true
 ```
